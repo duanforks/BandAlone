@@ -202,7 +202,7 @@ export function App() {
         <div>
           <p className="app__eyebrow">A tiny webcam band</p>
           <h1 className="app__wordmark">
-            Band Together<span aria-hidden="true">.</span>
+            Band Alone<span aria-hidden="true">.</span>
           </h1>
         </div>
         <p className="app__tagline">Move like you mean it!</p>
@@ -1128,7 +1128,7 @@ function Stage({
           {showWelcome ? (
             <div className="stage__welcome">
               <p className="stage__kicker">Acapella is way overrated</p>
-              <h2>Ready to band together?</h2>
+              <h2>Ready to band alone?</h2>
               <button className="stage__start" type="button" onClick={() => setWelcomed(true)}>
                 <span aria-hidden="true">▶</span> Start
               </button>
