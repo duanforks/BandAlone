@@ -185,10 +185,13 @@ describe('SingerChannel', () => {
 
     tone.meters[0].value = 0.42;
     expect(singer.level).toBe(0.42);
+    singer.setGain(1.6);
     singer.setEcho(0.6);
     singer.setReverb(2);
+    expect(tone.gains[0].gain.value).toBe(1.6);
     expect(tone.delays[0].wet.value).toBe(0.6);
     expect(tone.reverbs[0].wet.value).toBe(1);
+    expect(singer.info().gain).toBe(1.6);
 
     await singer.setEnabled(false);
     expect(mic.track.stopped).toBe(true);

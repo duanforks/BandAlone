@@ -66,6 +66,7 @@ export class Session {
   private readonly playerVolumes: [number, number] = [1, 1];
   /** Sampled guitar that accompanies sing-freely mode without requiring a camera gesture. */
   private autoGuitar: GuitarVoice | null = null;
+  private autoGuitarOutput: Tone.Volume | null = null;
   private singingFreely = false;
   /** Players the UI has not named since the last `setNumPlayers` (see there). */
   private unconfirmed: Set<PlayerId> | null = null;
@@ -275,6 +276,17 @@ export class Session {
     if (!on) this.backing.releaseAll();
   }
 
+  /** Generated backing master level in dB. */
+  setBackingVolume(volume: number): void {
+    this.backing.setVolume(clampDb(volume));
+  }
+
+  /** Automatic sampled guitar level in Sing Freely, in dB. */
+  setSingFreelyGuitarVolume(volume: number): void {
+    this.config.backing.singFreelyGuitarVolume = clampDb(volume);
+    if (this.autoGuitarOutput) this.autoGuitarOutput.volume.value = this.config.backing.singFreelyGuitarVolume;
+  }
+
   /** The band carries the beat (so the click may go quiet) only when it is switched on and built. */
   private get backingOn(): boolean {
     return this.config.backing.enabled && this.backing.ready;
@@ -342,7 +354,12 @@ export class Session {
       paused: this.isPaused,
       standby: this.isStandby,
       song: this.songInfo(),
-      backing: { enabled: this.config.backing.enabled, parts: { ...this.config.backing.parts } },
+      backing: {
+        enabled: this.config.backing.enabled,
+        parts: { ...this.config.backing.parts },
+        volume: this.config.backing.volume,
+        singFreelyGuitarVolume: this.config.backing.singFreelyGuitarVolume,
+      },
       singer: this.singer.info(),
       players,
     };
@@ -440,7 +457,8 @@ export class Session {
 
   private ensureAutoGuitar(): void {
     if (this.autoGuitar) return;
-    this.autoGuitar = new GuitarVoice(() => this.audio.output, () => this.config.guitar);
+    this.autoGuitarOutput = new Tone.Volume(this.config.backing.singFreelyGuitarVolume).connect(this.audio.output);
+    this.autoGuitar = new GuitarVoice(() => this.autoGuitarOutput!, () => this.config.guitar);
     void this.audio.addVoice(this.autoGuitar);
   }
 
@@ -678,6 +696,8 @@ export class Session {
       this.audio.removeVoice(this.autoGuitar);
       this.autoGuitar = null;
     }
+    this.autoGuitarOutput?.dispose();
+    this.autoGuitarOutput = null;
     for (const gain of this.playerGains) gain?.dispose();
     this.playerGains.fill(null);
     this.audio.stop();
@@ -735,4 +755,8 @@ export class Session {
 
 function clampPlayers(n: number): number {
   return Math.min(MAX_PLAYERS, Math.max(1, Math.round(n) || 1));
+}
+
+function clampDb(volume: number): number {
+  return Math.min(6, Math.max(-24, volume));
 }

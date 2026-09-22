@@ -121,6 +121,12 @@ export class BackingBand {
     return this.drums;
   }
 
+  /** Set the generated band's master level in dB, immediately if it is loaded. */
+  setVolume(volume: number): void {
+    this.cfg().volume = volume;
+    if (this.out) this.out.volume.value = volume;
+  }
+
   /** Build the band on the current audio context; call after the engine started. Safe to call again after `dispose()`. */
   async load(): Promise<void> {
     if (this.out) return;

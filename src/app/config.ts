@@ -216,6 +216,8 @@ export interface Config {
     bassVolume: number;
     padVolume: number;
     drumsVolume: number;
+    /** Extra dB applied only to the automatic guitar in Sing Freely. */
+    singFreelyGuitarVolume: number;
     /** Velocity (0..1) of the easy-mode auto kick, which plays through the drummer's own kit at full level. */
     autoKickVelocity: number;
   };
@@ -342,6 +344,7 @@ export const DEFAULT_CONFIG: Config = {
     bassVolume: -8,
     padVolume: -4,
     drumsVolume: -2,
+    singFreelyGuitarVolume: 0,
     autoKickVelocity: 0.5,
   },
   players: { count: 1, deadZone: 0.05 },

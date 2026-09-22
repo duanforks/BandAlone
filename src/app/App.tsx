@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import * as Tone from 'tone';
 import { loadConfig } from './config';
 import { Session, type SessionPhase, type SessionStats } from './session';
 import type { SessionInfo, SongInfo } from './sessionInfo';
 import { INSTRUMENT_IDS, INSTRUMENT_MODES, type PlayableInstrumentId } from './instruments';
+import { LiveHarmonyPanel } from './LiveHarmonyPanel';
 import type { CameraInfo } from '@/vision/camera';
 import type { MicrophoneInfo } from '@/audio/singer';
 import { bus } from '@/core/bus';
@@ -50,6 +51,9 @@ type MultiplayerSession = Session & {
 };
 
 const TOAST_DURATION_MS = 2000;
+// Keep the mode implementation intact while the product UI is simplified.
+const SHOW_MODE_CONTROLS = false;
+const HARMONY_DRAG_TYPE = 'text/x-band-together-harmony-panel';
 
 const PLAYER_DEFAULTS: [PlayerSetup, PlayerSetup] = [
   { instrument: 'drums', vocals: false },
@@ -60,6 +64,10 @@ const PLAYER_INSTRUMENTS = [...INSTRUMENT_IDS, 'none'] as const;
 
 function instrumentLabel(id: PlayerInstrument): string {
   return id === 'none' ? 'No instrument' : INSTRUMENT_LABELS[id].label;
+}
+
+function formatDb(value: number): string {
+  return `${value > 0 ? '+' : ''}${value} dB`;
 }
 
 function InstrumentIcon({ instrument }: { instrument: PlayerInstrument }) {
@@ -241,13 +249,24 @@ function Stage({
   const [bassEnabled, setBassEnabled] = useState(config.backing.parts.bass);
   const [drumsEnabled, setDrumsEnabled] = useState(config.backing.parts.drums);
   const [padEnabled, setPadEnabled] = useState(config.backing.parts.pad);
+  const [backingVolume, setBackingVolume] = useState(config.backing.volume);
+  const [singFreelyGuitarVolume, setSingFreelyGuitarVolume] = useState(config.backing.singFreelyGuitarVolume);
   const [sessionInfo, setSessionInfo] = useState<KaraokeSessionInfo | null>(null);
   const [micPending, setMicPending] = useState(false);
   const [microphones, setMicrophones] = useState<MicrophoneInfo[]>([]);
   const [micDeviceId, setMicDeviceId] = useState(config.singer.deviceId);
+  const [micGain, setMicGain] = useState(config.singer.gain);
   const [echo, setEcho] = useState(config.singer.echo);
   const [reverb, setReverb] = useState(config.singer.reverb);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [harmonyPanelPlacement, setHarmonyPanelPlacement] = useState<'stage' | 'below'>(() => {
+    try {
+      return window.localStorage.getItem('band-together:harmony-panel') === 'stage' ? 'stage' : 'below';
+    } catch {
+      return 'below';
+    }
+  });
+  const [harmonyPanelDragging, setHarmonyPanelDragging] = useState(false);
   const [, refreshConfig] = useState(0);
 
   playerSetupRef.current = { count: playerCount, players };
@@ -342,6 +361,9 @@ function Stage({
       setBassEnabled(info.backing.parts.bass);
       setDrumsEnabled(info.backing.parts.drums);
       setPadEnabled(info.backing.parts.pad);
+      setBackingVolume(info.backing.volume);
+      setSingFreelyGuitarVolume(info.backing.singFreelyGuitarVolume);
+      setMicGain(info.singer.gain);
       setEcho(info.singer.echo);
       setReverb(info.singer.reverb);
       if (info.singer.deviceId) setMicDeviceId(info.singer.deviceId);
@@ -497,6 +519,16 @@ function Stage({
     sessionRef.current?.setBackingPart('pad', next);
   };
 
+  const changeBackingVolume = (volume: number) => {
+    setBackingVolume(volume);
+    sessionRef.current?.setBackingVolume(volume);
+  };
+
+  const changeSingFreelyGuitarVolume = (volume: number) => {
+    setSingFreelyGuitarVolume(volume);
+    sessionRef.current?.setSingFreelyGuitarVolume(volume);
+  };
+
   const toggleSinger = async () => {
     const current = sessionRef.current;
     if (!current || micPending) return;
@@ -535,6 +567,11 @@ function Stage({
     sessionRef.current?.singer.setEcho(amount);
   };
 
+  const changeMicGain = (amount: number) => {
+    setMicGain(amount);
+    sessionRef.current?.singer.setGain(amount);
+  };
+
   const changeReverb = (amount: number) => {
     setReverb(amount);
     sessionRef.current?.singer.setReverb(amount);
@@ -557,6 +594,34 @@ function Stage({
       }).toDestination();
     vocalCueSynthRef.current = synth;
     synth.triggerAttackRelease(pitch, 0.9);
+  };
+
+  const moveHarmonyPanel = (placement: 'stage' | 'below') => {
+    setHarmonyPanelPlacement(placement);
+    try {
+      window.localStorage.setItem('band-together:harmony-panel', placement);
+    } catch {
+      // Storage can be unavailable in private browsing; the in-memory choice still works.
+    }
+  };
+
+  const startHarmonyPanelDrag = (event: DragEvent<HTMLDivElement>) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(HARMONY_DRAG_TYPE, 'live-harmony');
+    setHarmonyPanelDragging(true);
+  };
+
+  const allowHarmonyPanelDrop = (event: DragEvent<HTMLElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(HARMONY_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const dropHarmonyPanel = (event: DragEvent<HTMLElement>, placement: 'stage' | 'below') => {
+    if (!event.dataTransfer.getData(HARMONY_DRAG_TYPE)) return;
+    event.preventDefault();
+    moveHarmonyPanel(placement);
+    setHarmonyPanelDragging(false);
   };
 
   const aspect = stats && stats.width > 0 ? `${stats.width} / ${stats.height}` : '4 / 3';
@@ -595,6 +660,36 @@ function Stage({
       : songRunning
         ? { tone: 'live', label: 'Playing' }
         : { tone: 'idle', label: 'Ready' };
+  const liveHarmonyPanel =
+    live && isSingFreely ? (
+      <div
+        className="live-harmony-placement"
+        draggable
+        role="group"
+        aria-label="Moveable live harmony panel"
+        onDragStart={startHarmonyPanelDrag}
+        onDragEnd={() => setHarmonyPanelDragging(false)}
+      >
+        <button
+          className="live-harmony-placement__move"
+          type="button"
+          draggable={false}
+          aria-label={harmonyPanelPlacement === 'stage' ? 'Move notes below video' : 'Move notes onto video'}
+          title={harmonyPanelPlacement === 'stage' ? 'Move notes below video' : 'Move notes onto video'}
+          onClick={() => moveHarmonyPanel(harmonyPanelPlacement === 'stage' ? 'below' : 'stage')}
+        >
+          <span aria-hidden="true">{harmonyPanelPlacement === 'stage' ? '↘' : '↗'}</span>
+        </button>
+        <LiveHarmonyPanel
+          harmony={harmony}
+          chord={songInfo?.chord ?? null}
+          beat={songInfo?.beat ?? 0}
+          beatsPerBar={sessionInfo?.beatsPerBar ?? 4}
+          running={songInfo?.running ?? false}
+          micEnabled={singerInfo?.enabled ?? false}
+        />
+      </div>
+    ) : null;
 
   return (
     <section className="stage-wrap" data-prestart={active ? undefined : ''}>
@@ -639,32 +734,34 @@ function Stage({
             <button className="btn band-summary__edit" type="button" disabled={!live} onClick={() => setEditingPlayers(true)}>
               Edit players
             </button>
-            <div className="sidebar-field">
-              <span>Mode</span>
-              <div className="segmented" data-mode={mode} role="group" aria-label="Difficulty">
-                <button
-                  type="button"
-                  onClick={() => applyMode('easy')}
-                  disabled={!live}
-                  aria-pressed={mode === 'easy'}
-                  title="Easy: the song chooses what you play."
-                >
-                  Easy
-                </button>
-                <button
-                  type="button"
-                  onClick={() => applyMode('hard')}
-                  disabled={!live || !hardModeAvailable}
-                  aria-pressed={mode === 'hard'}
-                  title={hardModeAvailable ? 'Hard: your gesture chooses what you play.' : 'Guitar is easy mode only.'}
-                >
-                  Hard
-                </button>
+            {SHOW_MODE_CONTROLS && (
+              <div className="sidebar-field">
+                <span>Mode</span>
+                <div className="segmented" data-mode={mode} role="group" aria-label="Difficulty">
+                  <button
+                    type="button"
+                    onClick={() => applyMode('easy')}
+                    disabled={!live}
+                    aria-pressed={mode === 'easy'}
+                    title="Easy: the song chooses what you play."
+                  >
+                    Easy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyMode('hard')}
+                    disabled={!live || !hardModeAvailable}
+                    aria-pressed={mode === 'hard'}
+                    title={hardModeAvailable ? 'Hard: your gesture chooses what you play.' : 'Guitar is easy mode only.'}
+                  >
+                    Hard
+                  </button>
+                </div>
+                <p className="hint" style={{ margin: '0.35rem 0 0', fontSize: '0.62rem', lineHeight: 1.35 }}>
+                  {modeHintText}
+                </p>
               </div>
-              <p className="hint" style={{ margin: '0.35rem 0 0', fontSize: '0.62rem', lineHeight: 1.35 }}>
-                {modeHintText}
-              </p>
-            </div>
+            )}
           </div>
 
           <div className="control-section">
@@ -755,19 +852,44 @@ function Stage({
                 <strong>{padEnabled ? 'On' : 'Off'}</strong>
               </button>
             </div>
+            {isSingFreely && (
+              <div className="mix-levels" aria-label="Sing Freely accompaniment levels">
+                <label>
+                  <span>
+                    Backing band <output>{formatDb(backingVolume)}</output>
+                  </span>
+                  <input
+                    type="range"
+                    min="-24"
+                    max="6"
+                    step="1"
+                    value={backingVolume}
+                    disabled={!live || !backingEnabled}
+                    onChange={(event) => changeBackingVolume(Number(event.target.value))}
+                  />
+                </label>
+                <label>
+                  <span>
+                    Auto guitar <output>{formatDb(singFreelyGuitarVolume)}</output>
+                  </span>
+                  <input
+                    type="range"
+                    min="-24"
+                    max="6"
+                    step="1"
+                    value={singFreelyGuitarVolume}
+                    disabled={!live}
+                    onChange={(event) => changeSingFreelyGuitarVolume(Number(event.target.value))}
+                  />
+                </label>
+              </div>
+            )}
           </div>
 
           <div className="control-section vocals-sidebar">
             <span className="control-label">Vocals</span>
             {isSingFreely && (
               <div className="live-harmony">
-                <div className="live-harmony__readout">
-                  <span>Detected note</span>
-                  <strong>{harmony?.detectedNote ?? '—'}</strong>
-                  <small>
-                    {harmony?.keyOverride ? `${harmony.key} major · manual` : `Auto key · ${harmony?.key ?? 'G'} major`}
-                  </small>
-                </div>
                 <label>
                   <span>Key</span>
                   <select
@@ -845,6 +967,22 @@ function Stage({
             <div className="vocals-sidebar__effects">
               <label>
                 <span>
+                  Mic gain <output>{Math.round(micGain * 100)}%</output>
+                </span>
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  value={micGain}
+                  disabled={!live}
+                  aria-label="Microphone gain"
+                  title="Levels above 100% boost quiet microphones and may cause feedback."
+                  onChange={(event) => changeMicGain(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                <span>
                   Echo <output>{Math.round(echo * 100)}%</output>
                 </span>
                 <input
@@ -875,7 +1013,13 @@ function Stage({
           </div>
         </div>
 
-        <div className="stage" style={{ aspectRatio: aspect }}>
+        <div
+          className="stage"
+          style={{ aspectRatio: aspect }}
+          data-harmony-drop={harmonyPanelDragging && harmonyPanelPlacement === 'below' ? '' : undefined}
+          onDragOver={allowHarmonyPanelDrop}
+          onDrop={(event) => dropHarmonyPanel(event, 'stage')}
+        >
           <video ref={videoRef} className="stage__video" />
           <canvas ref={canvasRef} className="stage__canvas" />
           <div className="toast-stack" aria-live="polite" aria-relevant="additions">
@@ -930,45 +1074,51 @@ function Stage({
               </div>
             </>
           )}
-          {live && (
-            <div className="karaoke-hud" aria-live="polite">
-              <div className="karaoke-hud__song">
-                <span>{songInfo?.running ? songInfo.title : isSingFreely ? SING_FREELY_SONG.title : SONGS[songId]?.title}</span>
-                <small>
-                  {isSingFreely && songInfo?.running
-                    ? harmony?.detectedNote
-                      ? `Hearing ${harmony.detectedNote} · ${harmony.key} major`
-                      : singerInfo?.enabled
-                        ? `Sing a few notes · ${harmony?.key ?? 'G'} major`
-                        : 'Microphone off'
-                    : songInfo?.running
-                    ? `${songInfo.section ?? 'Song'} · bar ${(songInfo.bar % Math.max(songInfo.barCount, 1)) + 1}`
-                    : 'Choose a song, then press Play'}
-                </small>
-              </div>
-              <div className="karaoke-hud__chords">
-                <div>
-                  <small>Now</small>
-                  <strong>{songInfo?.chord ?? '—'}</strong>
+          {live &&
+            (isSingFreely ? (
+              <div className="karaoke-hud karaoke-hud--live">
+                <div className="karaoke-hud__song">
+                  <span>{SING_FREELY_SONG.title}</span>
+                  <small>{songInfo?.running ? 'Live accompaniment' : 'Ready when you are'}</small>
                 </div>
-                <span aria-hidden="true">→</span>
-                <div>
-                  <small>{isSingFreely ? 'Detected' : 'Next'}</small>
-                  <strong>{isSingFreely ? (harmony?.detectedNote ?? '—') : (songInfo?.nextChord ?? '—')}</strong>
+                <div className="karaoke-hud__beat" aria-label={`Beat ${(songInfo?.beat ?? 0) + 1}`}>
+                  {Array.from({ length: sessionInfo?.beatsPerBar ?? 4 }, (_, beat) => (
+                    <i key={beat} data-active={songInfo?.running && beat === songInfo.beat ? '' : undefined} />
+                  ))}
                 </div>
               </div>
-              <div className="karaoke-hud__beat" aria-label={`Beat ${(songInfo?.beat ?? 0) + 1}`}>
-                {Array.from({ length: sessionInfo?.beatsPerBar ?? 4 }, (_, beat) => (
-                  <i key={beat} data-active={songInfo?.running && beat === songInfo.beat ? '' : undefined} />
-                ))}
-              </div>
-              {!isSingFreely && (
+            ) : (
+              <div className="karaoke-hud" aria-live="polite">
+                <div className="karaoke-hud__song">
+                  <span>{songInfo?.running ? songInfo.title : SONGS[songId]?.title}</span>
+                  <small>
+                    {songInfo?.running
+                      ? `${songInfo.section ?? 'Song'} · bar ${(songInfo.bar % Math.max(songInfo.barCount, 1)) + 1}`
+                      : 'Choose a song, then press Play'}
+                  </small>
+                </div>
+                <div className="karaoke-hud__chords">
+                  <div>
+                    <small>Now</small>
+                    <strong>{songInfo?.chord ?? '—'}</strong>
+                  </div>
+                  <span aria-hidden="true">→</span>
+                  <div>
+                    <small>Next</small>
+                    <strong>{songInfo?.nextChord ?? '—'}</strong>
+                  </div>
+                </div>
+                <div className="karaoke-hud__beat" aria-label={`Beat ${(songInfo?.beat ?? 0) + 1}`}>
+                  {Array.from({ length: sessionInfo?.beatsPerBar ?? 4 }, (_, beat) => (
+                    <i key={beat} data-active={songInfo?.running && beat === songInfo.beat ? '' : undefined} />
+                  ))}
+                </div>
                 <div className="karaoke-hud__progress" aria-hidden="true">
                   <i style={{ width: `${songProgress}%` }} />
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            ))}
+          {harmonyPanelPlacement === 'stage' && liveHarmonyPanel}
           {live && songInfo?.countIn?.active && (
             <div className="count-in" role="status">
               <span>Get ready</span>
@@ -1037,7 +1187,7 @@ function Stage({
                 P{playerId + 1} · {instrumentLabel(player.instrument)}
               </span>
             ))}
-            <span className="instrument-chip">{mode}</span>
+            {SHOW_MODE_CONTROLS && <span className="instrument-chip">{mode}</span>}
             <span className="hint">
               <kbd>C</kbd> calibrate · <kbd>space</kbd> kick
             </span>
@@ -1086,6 +1236,25 @@ function Stage({
           </details>
         </div>
       </div>
+
+      {live && isSingFreely && (
+        <div
+          className="harmony-dock"
+          data-empty={harmonyPanelPlacement === 'stage' ? '' : undefined}
+          data-drag-active={harmonyPanelDragging ? '' : undefined}
+          onDragOver={allowHarmonyPanelDrop}
+          onDrop={(event) => dropHarmonyPanel(event, 'below')}
+        >
+          {harmonyPanelPlacement === 'below' ? (
+            liveHarmonyPanel
+          ) : (
+            <div className="harmony-dock__target" role="region" aria-label="Live notes drop area">
+              <strong>Live notes dock</strong>
+              <span>Drag the note panel here or use its corner arrow.</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {showDebug && session && <DebugPanel session={session} config={config} onClose={() => setShowDebug(false)} />}
     </section>

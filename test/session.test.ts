@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '@/app/config';
-import { getSong } from '@/song/songs';
+import { getSong, SING_FREELY_ID } from '@/song/songs';
 import { Session } from '@/app/session';
 import { bus } from '@/core/bus';
 import { FREEPLAY_CONTEXT } from '@/audio/modes';
@@ -204,6 +204,10 @@ describe('Session seams', () => {
     expect((s.controllers[0].resolver as { id?: string }).id).toBe('hard');
     s.setBacking(false);
     expect(s.info().backing.enabled).toBe(false);
+    s.setBackingVolume(20);
+    s.setSingFreelyGuitarVolume(-12);
+    expect(s.info().backing).toMatchObject({ volume: 6, singFreelyGuitarVolume: -12 });
+    expect(s.config.guitar.volume).toBe(DEFAULT_CONFIG.guitar.volume);
     s.setNumPlayers(5);
     expect(s.config.players.count).toBe(2);
     s.stop();
@@ -244,6 +248,29 @@ describe('Session seams', () => {
     expect(s.info().song).toMatchObject({ nextChord: 'C', section: 'chorus' });
     s.stop();
     expect(s.info().song.nextChord).toBeNull();
+  });
+
+  it('passes the sing-freely note window and live harmony metadata through info()', () => {
+    const s = makeSession(null);
+    s.config.play.song = SING_FREELY_ID;
+    s.singer.harmonizer.setActive(true);
+    let t = 0;
+    for (const frequency of [261.63, 329.63, 392]) {
+      for (let frame = 0; frame < 3; frame++) {
+        s.singer.harmonizer.observe({ frequency, clarity: 0.95, rms: 0.3 }, (t += 50));
+      }
+    }
+
+    const info = s.info();
+    expect(info.song).toMatchObject({ id: SING_FREELY_ID, barCount: 0, running: false });
+    expect(info.singer.harmony).toMatchObject({
+      active: true,
+      keyWindowSize: 12,
+      keyReady: false,
+      recentChords: [],
+    });
+    expect(info.singer.harmony.recentNotes.map((note) => note.name)).toEqual(['C4', 'E4', 'G4']);
+    s.stop();
   });
 
   it('pause and resume flip the paused flag, and info() reports it', () => {

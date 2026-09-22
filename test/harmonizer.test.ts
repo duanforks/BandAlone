@@ -15,6 +15,16 @@ function sing(harmonizer: SingingHarmonizer, frequencies: number[]): void {
   }
 }
 
+function singFrom(harmonizer: SingingHarmonizer, frequencies: number[], start = 0): number {
+  let t = start;
+  for (const frequency of frequencies) {
+    for (let frame = 0; frame < 3; frame++) {
+      harmonizer.observe({ frequency, clarity: 0.95, rms: 0.3 }, (t += 50));
+    }
+  }
+  return t;
+}
+
 describe('microphone pitch analysis', () => {
   it('finds a sung sine pitch and rejects silence', () => {
     const estimate = detectPitch(sine(440), 48_000);
@@ -56,5 +66,63 @@ describe('singing harmonizer', () => {
     expect(harmonizer.snapshot().detectedNote).toBe('A4');
     harmonizer.observeSilence(500);
     expect(harmonizer.snapshot().detectedNote).toBeNull();
+  });
+
+  it('records stabilized note onsets without filling the key window with held frames', () => {
+    const harmonizer = new SingingHarmonizer();
+    harmonizer.setActive(true);
+    let t = singFrom(harmonizer, [440]);
+    t = singFrom(harmonizer, [440], t);
+    expect(harmonizer.snapshot().recentNotes.map((note) => note.name)).toEqual(['A4']);
+
+    t = singFrom(harmonizer, [493.88], t);
+    expect(harmonizer.snapshot().recentNotes.map((note) => note.name)).toEqual(['A4', 'B4']);
+
+    harmonizer.observeSilence(t + 300);
+    singFrom(harmonizer, [493.88], t + 300);
+    expect(harmonizer.snapshot().recentNotes.map((note) => note.name)).toEqual(['A4', 'B4', 'B4']);
+  });
+
+  it('uses and exposes exactly the latest 12 stabilized notes for automatic key detection', () => {
+    const harmonizer = new SingingHarmonizer();
+    harmonizer.setActive(true);
+    const frequencies = [261.63, 293.66, 329.63, 349.23, 392, 440, 493.88, 523.25, 587.33, 659.25, 698.46, 783.99, 880];
+    singFrom(harmonizer, frequencies);
+    const snapshot = harmonizer.snapshot();
+    expect(snapshot.keyWindowSize).toBe(12);
+    expect(snapshot.recentNotes).toHaveLength(12);
+    expect(snapshot.recentNotes[0].name).toBe('D4');
+    expect(snapshot.recentNotes.at(-1)?.name).toBe('A5');
+    expect(snapshot.keyReady).toBe(true);
+    expect(snapshot.keyConfidence).toBeGreaterThan(0);
+  });
+
+  it('detects C major from the same note window shown to the user', () => {
+    const harmonizer = new SingingHarmonizer();
+    harmonizer.setActive(true);
+    singFrom(harmonizer, [261.63, 329.63, 392, 293.66, 349.23, 440, 261.63, 329.63]);
+    expect(harmonizer.snapshot()).toMatchObject({ key: 'C', keyReady: true, keyOverride: null });
+  });
+
+  it('reports a manual key as locked while continuing to collect visible notes', () => {
+    const harmonizer = new SingingHarmonizer();
+    harmonizer.setKeyOverride('F#');
+    harmonizer.setActive(true);
+    singFrom(harmonizer, [369.99, 466.16]);
+    expect(harmonizer.snapshot()).toMatchObject({ key: 'F#', keyConfidence: 1, keyReady: true, keyOverride: 'F#' });
+    expect(harmonizer.snapshot().recentNotes).toHaveLength(2);
+  });
+
+  it('resets note and chord histories between sing-freely sessions', () => {
+    const harmonizer = new SingingHarmonizer();
+    harmonizer.setActive(true);
+    singFrom(harmonizer, [261.63, 329.63, 392]);
+    for (let bar = 0; bar < 5; bar++) harmonizer.chooseChord();
+    expect(harmonizer.snapshot().recentChords).toHaveLength(4);
+
+    harmonizer.setActive(false);
+    expect(harmonizer.snapshot()).toMatchObject({ recentNotes: [], recentChords: [], keyReady: false });
+    harmonizer.setActive(true);
+    expect(harmonizer.snapshot()).toMatchObject({ recentNotes: [], recentChords: [] });
   });
 });

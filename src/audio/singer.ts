@@ -108,6 +108,12 @@ export class SingerChannel {
     if (this.reverb) this.reverb.wet.value = this.config.reverb;
   }
 
+  /** Linear microphone gain, 0..2. Values above 1 boost quiet inputs. */
+  setGain(amount: number): void {
+    this.config.gain = clampRange(amount, 0, 2);
+    if (this.inputGain) this.inputGain.gain.value = this.config.gain;
+  }
+
   setHarmonyActive(active: boolean): void {
     this.harmonizer.setActive(active);
   }
@@ -123,6 +129,7 @@ export class SingerChannel {
       enabled: this.enabled,
       available: this.available,
       level: this.level,
+      gain: this.config.gain,
       echo: this.config.echo,
       reverb: this.config.reverb,
       deviceId: this.deviceId,
@@ -255,6 +262,10 @@ export class SingerChannel {
 
 function clamp(value: number): number {
   return Math.min(1, Math.max(0, value));
+}
+
+function clampRange(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function stopStream(stream: MediaStream | null): void {

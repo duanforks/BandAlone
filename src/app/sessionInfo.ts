@@ -21,7 +21,14 @@ export interface SessionInfo {
   /** The band is held while the players are edited: hands are tracked, nothing plays (see `Session.setStandby`). */
   standby: boolean;
   song: SongInfo;
-  backing: { enabled: boolean; parts: { bass: boolean; pad: boolean; drums: boolean } };
+  backing: {
+    enabled: boolean;
+    parts: { bass: boolean; pad: boolean; drums: boolean };
+    /** Generated backing master level, dB. */
+    volume: number;
+    /** Automatic guitar level used by Sing Freely, dB. */
+    singFreelyGuitarVolume: number;
+  };
   singer: SingerInfo;
   players: PlayerInfo[];
 }
@@ -66,6 +73,8 @@ export interface SingerInfo {
   available: boolean;
   /** Input level, 0..1. */
   level: number;
+  /** Linear monitor gain, 0..2. */
+  gain: number;
   echo: number;
   reverb: number;
   /** Browser ID of the active or selected audio input. */

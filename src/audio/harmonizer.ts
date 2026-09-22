@@ -6,6 +6,11 @@ const CHORD_DEGREES = [0, 1, 2, 3, 4, 5] as const;
 const CHORD_QUALITIES = [false, true, true, false, false, true] as const;
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88] as const;
 const DEFAULT_KEY_ROOT = 7; // G major: friendly open guitar voicings while auto-detection warms up.
+export const HARMONY_KEY_WINDOW_SIZE = 12;
+const MIN_KEY_NOTES = 6;
+const MIN_KEY_PITCH_CLASSES = 3;
+const KEY_SWITCH_VOTES = 2;
+const CHORD_HISTORY_SIZE = 4;
 
 export const MAJOR_KEY_OPTIONS = NOTE_NAMES.map((value, root) => ({
   value,
@@ -30,6 +35,20 @@ export interface PitchEstimate {
   rms: number;
 }
 
+export interface HarmonyNote {
+  /** Monotonically increasing within one active sing-freely session. */
+  id: number;
+  midi: number;
+  pitchClass: number;
+  name: string;
+  confidence: number;
+}
+
+export interface HarmonyChord {
+  id: number;
+  chord: ChordName;
+}
+
 export interface HarmonySnapshot {
   active: boolean;
   detectedNote: string | null;
@@ -38,8 +57,14 @@ export interface HarmonySnapshot {
   /** Current major key, without the "major" suffix. */
   key: string;
   keyConfidence: number;
+  /** True once auto mode has enough visible evidence, or whenever the key is manually locked. */
+  keyReady: boolean;
   keyOverride: string | null;
+  /** The exact, ordered evidence window used by automatic key detection. */
+  recentNotes: readonly HarmonyNote[];
+  keyWindowSize: number;
   chord: ChordName;
+  recentChords: readonly HarmonyChord[];
 }
 
 /**
@@ -117,13 +142,16 @@ export class SingingHarmonizer {
   private overrideRoot: number | null = null;
   private autoRoot = DEFAULT_KEY_ROOT;
   private autoConfidence = 0;
+  private autoReady = false;
   private pendingRoot = DEFAULT_KEY_ROOT;
   private pendingRootFrames = 0;
-  private keySamples = 0;
-  private readonly keyHistogram = new Float64Array(12);
+  private noteSequence = 0;
+  private chordSequence = 0;
+  private readonly recentNotes: HarmonyNote[] = [];
+  private readonly recentChords: HarmonyChord[] = [];
   private readonly phraseHistogram = new Float64Array(12);
   private phraseSamples = 0;
-  private stablePitchClass: number | null = null;
+  private stableMidi: number | null = null;
   private stablePitchFrames = 0;
   private lastVoicedAt = -Infinity;
   private note: string | null = null;
@@ -154,6 +182,7 @@ export class SingingHarmonizer {
   setKeyOverride(key: string | null): void {
     const root = key === null ? null : NOTE_NAMES.indexOf(key as (typeof NOTE_NAMES)[number]);
     this.overrideRoot = root !== null && root >= 0 ? root : null;
+    if (this.overrideRoot === null) this.updateAutoKey(true);
     this.degree = 0;
     this.phraseHistogram.fill(0);
     this.phraseSamples = 0;
@@ -170,21 +199,18 @@ export class SingingHarmonizer {
     this.confidence = estimate.clarity;
     this.lastVoicedAt = now;
 
-    if (pitch.pitchClass === this.stablePitchClass) this.stablePitchFrames++;
+    if (pitch.midi === this.stableMidi) this.stablePitchFrames++;
     else {
-      this.stablePitchClass = pitch.pitchClass;
+      this.stableMidi = pitch.midi;
       this.stablePitchFrames = 1;
     }
     // A two-frame vote rejects most octave-edge and consonant transients.
     if (this.stablePitchFrames < 2) return;
 
-    for (let i = 0; i < 12; i++) this.keyHistogram[i] *= 0.998;
     const weight = estimate.clarity;
-    this.keyHistogram[pitch.pitchClass] += weight;
+    if (this.stablePitchFrames === 2) this.rememberNote(pitch, weight);
     this.phraseHistogram[pitch.pitchClass] += weight;
-    this.keySamples++;
     this.phraseSamples++;
-    this.updateAutoKey();
   }
 
   observeSilence(now = performance.now()): void {
@@ -192,7 +218,7 @@ export class SingingHarmonizer {
     this.note = null;
     this.frequency = null;
     this.confidence = 0;
-    this.stablePitchClass = null;
+    this.stableMidi = null;
     this.stablePitchFrames = 0;
   }
 
@@ -201,6 +227,7 @@ export class SingingHarmonizer {
     if (this.phraseSamples < 2) {
       this.phraseHistogram.fill(0);
       this.phraseSamples = 0;
+      this.rememberChord(this.currentChord);
       return this.currentChord;
     }
 
@@ -232,6 +259,7 @@ export class SingingHarmonizer {
     this.currentChord = chordName(root, bestDegree);
     this.phraseHistogram.fill(0);
     this.phraseSamples = 0;
+    this.rememberChord(this.currentChord);
     return this.currentChord;
   }
 
@@ -243,8 +271,12 @@ export class SingingHarmonizer {
       pitchConfidence: this.confidence,
       key: NOTE_NAMES[this.keyRoot],
       keyConfidence: this.overrideRoot === null ? this.autoConfidence : 1,
+      keyReady: this.overrideRoot !== null || this.autoReady,
       keyOverride: this.overrideRoot === null ? null : NOTE_NAMES[this.overrideRoot],
+      recentNotes: this.recentNotes.map((note) => ({ ...note })),
+      keyWindowSize: HARMONY_KEY_WINDOW_SIZE,
       chord: this.currentChord,
+      recentChords: this.recentChords.map((event) => ({ ...event })),
     };
   }
 
@@ -252,35 +284,73 @@ export class SingingHarmonizer {
     return this.overrideRoot ?? this.autoRoot;
   }
 
-  private updateAutoKey(): void {
-    if (this.overrideRoot !== null || this.keySamples < 18) return;
-    let distinct = 0;
-    for (const weight of this.keyHistogram) if (weight >= 1.25) distinct++;
-    if (distinct < 3) return;
+  private rememberNote(pitch: { midi: number; pitchClass: number; name: string }, confidence: number): void {
+    this.recentNotes.push({
+      id: ++this.noteSequence,
+      midi: pitch.midi,
+      pitchClass: pitch.pitchClass,
+      name: pitch.name,
+      confidence,
+    });
+    if (this.recentNotes.length > HARMONY_KEY_WINDOW_SIZE) this.recentNotes.shift();
+    this.updateAutoKey();
+  }
+
+  private rememberChord(chord: ChordName): void {
+    this.recentChords.push({ id: ++this.chordSequence, chord });
+    if (this.recentChords.length > CHORD_HISTORY_SIZE) this.recentChords.shift();
+  }
+
+  private updateAutoKey(commitImmediately = false): void {
+    const histogram = new Float64Array(12);
+    for (const note of this.recentNotes) histogram[note.pitchClass] += note.confidence;
+    const distinct = histogram.reduce((count, weight) => count + (weight > 0 ? 1 : 0), 0);
+    this.autoReady = this.recentNotes.length >= MIN_KEY_NOTES && distinct >= MIN_KEY_PITCH_CLASSES;
+    if (!this.autoReady) {
+      this.autoConfidence = 0;
+      this.pendingRoot = this.autoRoot;
+      this.pendingRootFrames = 0;
+      return;
+    }
 
     const scores = NOTE_NAMES.map((_, tonic) =>
-      MAJOR_PROFILE.reduce((sum, profileWeight, interval) => sum + profileWeight * this.keyHistogram[(tonic + interval) % 12], 0),
+      MAJOR_PROFILE.reduce((sum, profileWeight, interval) => sum + profileWeight * histogram[(tonic + interval) % 12], 0),
     );
     const ranked = scores.map((score, root) => ({ root, score })).sort((a, b) => b.score - a.score);
     const candidate = ranked[0].root;
-    this.autoConfidence = Math.max(0, Math.min(1, ((ranked[0].score - ranked[1].score) / Math.max(ranked[0].score, 0.001)) * 5));
+    const confidence = Math.max(0, Math.min(1, ((ranked[0].score - ranked[1].score) / Math.max(ranked[0].score, 0.001)) * 5));
+    if (commitImmediately || candidate === this.autoRoot) {
+      this.autoRoot = candidate;
+      this.autoConfidence = confidence;
+      this.pendingRoot = candidate;
+      this.pendingRootFrames = 0;
+      return;
+    }
     if (candidate === this.pendingRoot) this.pendingRootFrames++;
     else {
       this.pendingRoot = candidate;
       this.pendingRootFrames = 1;
     }
-    if (this.pendingRootFrames >= 5) this.autoRoot = candidate;
+    this.autoConfidence = 0;
+    if (this.pendingRootFrames >= KEY_SWITCH_VOTES) {
+      this.autoRoot = candidate;
+      this.autoConfidence = confidence;
+      this.pendingRootFrames = 0;
+    }
   }
 
   private resetEvidence(): void {
-    this.keyHistogram.fill(0);
     this.phraseHistogram.fill(0);
-    this.keySamples = 0;
+    this.recentNotes.length = 0;
+    this.recentChords.length = 0;
+    this.noteSequence = 0;
+    this.chordSequence = 0;
     this.phraseSamples = 0;
     this.autoConfidence = 0;
+    this.autoReady = false;
     this.pendingRoot = this.autoRoot;
     this.pendingRootFrames = 0;
-    this.stablePitchClass = null;
+    this.stableMidi = null;
     this.stablePitchFrames = 0;
     this.lastVoicedAt = -Infinity;
   }
