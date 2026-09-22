@@ -1,5 +1,5 @@
 # Band Alone
-Improving solo modes from the [original BandTogether](https://agduan.github.io/BandTogether/)
+This is a fork of [BandTogether](https://agduan.github.io/BandTogether/) which improves the solo free singing modes and backing track functionalities.
 
 A webcam and an on-device hand-tracking model let you play guitar, bass and drums in the air, with instruments and the song's chords drawn over the live video. Anyone can sing along through the microphone. If you are lonely, a generated backing band fills in every part nobody is playing. Everything runs in the page: no instrument, no controller, no account, and no backend!
 
