@@ -31,7 +31,7 @@ jobs:
         run: npm ci
 
       - name: Build website
-        run: npm run build -- --base=/BandTogether/
+        run: npm run build -- --base=/BandAlone/
 
       - name: Upload website
         uses: actions/upload-pages-artifact@v3
